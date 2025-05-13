@@ -1,12 +1,9 @@
--- Shop Stock and Weather Monitor with API Data Management and Health Monitoring
+-- Shop Stock and Weather Monitor
 print("🛒 Shop Stock and Weather Monitor Starting...")
 
 -- Configuration
-local API_ENDPOINT = "https://gagdata.vercel.app/api/data"
-local API_AUTH_KEY = "GAMERSBERGGAG"
-local DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1371909907716112465/02IHVPmNEadS6nTwcseKNPHPwjIxK2P4raUE4tzgaqz_NO3vGaIAbF8aN76wVM5-YnPO"
-local CHECK_INTERVAL = 1  -- Check every 5 seconds
-local HEALTH_CHECK_INTERVAL = 15  -- Send health update every 60 seconds
+local API_ENDPOINT = "https://gamersbergbotapi.vercel.app/api/statics/testingbot"
+local CHECK_INTERVAL = 5  -- Check every 5 seconds
 local MAX_RETRIES = 3
 
 -- Cache to track changes
@@ -16,98 +13,8 @@ local Cache = {
     currentWeather = "None",
     weatherDuration = 0,
     lastUpdate = 0,
-    lastHealthUpdate = 0,
-    errorCount = 0,
-    successfulUpdates = 0,
-    failedUpdates = 0
+    errorCount = 0
 }
-
--- Function to send health logs to Discord webhook
-local function sendHealthLog(message, isError)
-    local success, response = pcall(function()
-        local currentTime = os.date("%Y-%m-%d %H:%M:%S")
-        local statusEmoji = isError and "❌" or "✅"
-        
-        local content = string.format("**%s Health Monitor** %s\n```\n[%s] %s\n```", 
-            game.Players.LocalPlayer.Name, 
-            statusEmoji,
-            currentTime, 
-            message)
-        
-        return request({
-            Url = DISCORD_WEBHOOK,
-            Method = "POST",
-            Headers = {
-                ["Content-Type"] = "application/json"
-            },
-            Body = string.format('{"content":"%s"}', content:gsub('"', '\\"'):gsub('\n', '\\n'))
-        })
-    end)
-    
-    if not success then
-        warn("❌ Failed to send health log:", response)
-    end
-    
-    return success
-end
-
--- Function to send detailed health report to Discord
-local function sendHealthReport()
-    local uptime = os.time() - Cache.lastUpdate
-    local hours = math.floor(uptime / 3600)
-    local minutes = math.floor((uptime % 3600) / 60)
-    local seconds = uptime % 60
-    
-    local healthReport = string.format([[
-**📊 Health Report**
-
-**Status**: Online
-**Uptime**: %02d:%02d:%02d
-**Player**: %s
-**Game ID**: %s
-
-**Statistics**:
-• Successful Updates: %d
-• Failed Updates: %d
-• Current Weather: %s
-• Weather Duration: %s
-• Seed Items: %d
-• Gear Items: %d
-• Last Update: <t:%d:R>
-
-**System Info**:
-• Memory Usage: %.2f MB
-]],
-        hours, minutes, seconds,
-        game.Players.LocalPlayer.Name,
-        game.PlaceId,
-        Cache.successfulUpdates,
-        Cache.failedUpdates,
-        Cache.currentWeather,
-        Cache.weatherDuration,
-        #Cache.seedStock,
-        #Cache.gearStock,
-        Cache.lastUpdate,
-        collectgarbage("count") / 1024
-    )
-    
-    local success, response = pcall(function()
-        return request({
-            Url = DISCORD_WEBHOOK,
-            Method = "POST",
-            Headers = {
-                ["Content-Type"] = "application/json"
-            },
-            Body = string.format('{"content":"%s"}', healthReport:gsub('"', '\\"'):gsub('\n', '\\n'))
-        })
-    end)
-    
-    if not success then
-        warn("❌ Failed to send health report:", response)
-    end
-    
-    return success
-end
 
 -- Function to check stock for a specific item
 local function checkStock(fruit, shopType)
@@ -179,156 +86,119 @@ local function collectStockData()
     end
     
     return data
-}
+end
 
--- Function to make API requests (GET, POST, PUT, PATCH, DELETE)
-local function makeAPIRequest(method, data)
+-- Function to detect changes in stock data
+local function hasChanges(oldData, newData)
+    -- Check weather changes
+    if oldData.weather.type ~= newData.weather.type or 
+       oldData.weather.duration ~= newData.weather.duration then
+        return true
+    end
+    
+    -- Check seeds
+    for seedName, newStock in pairs(newData.seeds) do
+        if oldData.seeds[seedName] ~= newStock then
+            return true
+        end
+    end
+    
+    -- Check for new or removed seeds
+    local oldSeedCount, newSeedCount = 0, 0
+    for _ in pairs(oldData.seeds) do oldSeedCount = oldSeedCount + 1 end
+    for _ in pairs(newData.seeds) do newSeedCount = newSeedCount + 1 end
+    if oldSeedCount ~= newSeedCount then
+        return true
+    end
+    
+    -- Check gear
+    for gearName, newStock in pairs(newData.gear) do
+        if oldData.gear[gearName] ~= newStock then
+            return true
+        end
+    end
+    
+    -- Check for new or removed gear
+    local oldGearCount, newGearCount = 0, 0
+    for _ in pairs(oldData.gear) do oldGearCount = oldGearCount + 1 end
+    for _ in pairs(newData.gear) do newGearCount = newGearCount + 1 end
+    if oldGearCount ~= newGearCount then
+        return true
+    end
+    
+    return false
+end
+
+-- Function to send data to API
+local function sendToAPI(data)
     local success, response = pcall(function()
-        local options = {
-            Url = API_ENDPOINT,
-            Method = method,
-            Headers = {
-                ["Content-Type"] = "application/json",
-                ["Authorization"] = API_AUTH_KEY
-            }
-        }
+        -- Convert data to JSON string (simple version)
+        local jsonStr = "{"
         
-        if data then
-            -- Convert data to JSON string (simple version)
-            local jsonStr = "{"
-            
-            -- Add timestamp
-            jsonStr = jsonStr .. '"timestamp":' .. data.timestamp .. ','
-            
-            -- Add player info
-            jsonStr = jsonStr .. '"playerName":"' .. data.playerName .. '",'
-            jsonStr = jsonStr .. '"userId":' .. data.userId .. ','
-            
-            -- Add weather info
-            jsonStr = jsonStr .. '"weather":{'
-            jsonStr = jsonStr .. '"type":"' .. data.weather.type .. '",'
-            jsonStr = jsonStr .. '"duration":' .. data.weather.duration
-            jsonStr = jsonStr .. '},'
-            
-            -- Add seeds
-            jsonStr = jsonStr .. '"seeds":{'
-            local first = true
-            for name, stock in pairs(data.seeds) do
-                if not first then jsonStr = jsonStr .. ',' end
-                first = false
-                jsonStr = jsonStr .. '"' .. name .. '":"' .. stock .. '"'
-            end
-            jsonStr = jsonStr .. '},'
-            
-            -- Add gear
-            jsonStr = jsonStr .. '"gear":{'
-            first = true
-            for name, stock in pairs(data.gear) do
-                if not first then jsonStr = jsonStr .. ',' end
-                first = false
-                jsonStr = jsonStr .. '"' .. name .. '":"' .. stock .. '"'
-            end
-            jsonStr = jsonStr .. '}'
-            
-            jsonStr = jsonStr .. "}"
-            
-            options.Body = jsonStr
-        }
+        -- Add timestamp
+        jsonStr = jsonStr .. '"timestamp":' .. data.timestamp .. ','
+        
+        -- Add player info
+        jsonStr = jsonStr .. '"playerName":"' .. data.playerName .. '",'
+        jsonStr = jsonStr .. '"userId":' .. data.userId .. ','
+        
+        -- Add weather info
+        jsonStr = jsonStr .. '"weather":{'
+        jsonStr = jsonStr .. '"type":"' .. data.weather.type .. '",'
+        jsonStr = jsonStr .. '"duration":' .. data.weather.duration
+        jsonStr = jsonStr .. '},'
+        
+        -- Add seeds
+        jsonStr = jsonStr .. '"seeds":{'
+        local first = true
+        for name, stock in pairs(data.seeds) do
+            if not first then jsonStr = jsonStr .. ',' end
+            first = false
+            jsonStr = jsonStr .. '"' .. name .. '":"' .. stock .. '"'
+        end
+        jsonStr = jsonStr .. '},'
+        
+        -- Add gear
+        jsonStr = jsonStr .. '"gear":{'
+        first = true
+        for name, stock in pairs(data.gear) do
+            if not first then jsonStr = jsonStr .. ',' end
+            first = false
+            jsonStr = jsonStr .. '"' .. name .. '":"' .. stock .. '"'
+        end
+        jsonStr = jsonStr .. '}'
+        
+        jsonStr = jsonStr .. "}"
         
         -- Send request using the supported REQUEST function
-        local result = request(options)
-        
-        -- Print response for debugging
-        print("API Response (" .. method .. "):", result.StatusCode, result.Body and string.sub(result.Body, 1, 100) .. "..." or "No body")
-        
-        return result
+        return request({
+            Url = API_ENDPOINT,
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json"
+            },
+            Body = jsonStr
+        })
     end)
     
     if not success then
-        warn("❌ Failed to make " .. method .. " request:", response)
-        sendHealthLog("Failed to make " .. method .. " request: " .. tostring(response), true)
-        return false, response
-    end
-    
-    -- Check if the status code indicates success
-    if response.StatusCode >= 200 and response.StatusCode < 300 then
-        -- Try to parse the response body
-        local responseData
-        success, responseData = pcall(function()
-            -- Simple JSON parser for the specific response structure
-            local body = response.Body
-            if body and body:match('"success":true') then
-                return {success = true}
-            else
-                return {success = false, message = body}
-            end
-        end)
+        warn("❌ Failed to send data:", response)
+        Cache.errorCount = Cache.errorCount + 1
         
-        if success and responseData.success then
-            return true, response
-        else
-            warn("❌ API request failed with response:", responseData.message or "Unknown error")
-            sendHealthLog("API request failed with response: " .. (responseData.message or "Unknown error"), true)
-            return false, response
+        if Cache.errorCount >= MAX_RETRIES then
+            warn("⚠️ Max retry attempts reached")
+            Cache.errorCount = 0
+            return false
         end
-    else
-        warn("❌ API request failed with status code:", response.StatusCode)
-        sendHealthLog("API request failed with status code: " .. tostring(response.StatusCode), true)
-        return false, response
-    end
-end
-
--- Function to update data using the appropriate method based on permissions
-local function updateAPIData(data)
-    print("📤 Updating API data...")
-    
-    -- Try PUT first (replaces data)
-    local success, response = makeAPIRequest("PUT", data)
-    
-    if success then
-        print("✅ Successfully updated API data using PUT")
-        return true
-    else
-        print("⚠️ PUT failed, trying POST...")
         
-        -- If PUT fails, try POST (creates new data)
-        success, response = makeAPIRequest("POST", data)
-        
-        if success then
-            print("✅ Successfully updated API data using POST")
-            return true
-        else
-            print("⚠️ POST failed, trying PATCH...")
-            
-            -- If POST fails, try PATCH (updates data partially)
-            success, response = makeAPIRequest("PATCH", data)
-            
-            if success then
-                print("✅ Successfully updated API data using PATCH")
-                return true
-            else
-                warn("❌ All update methods failed")
-                sendHealthLog("All API update methods failed", true)
-                return false
-            end
-        end
+        print("🔄 Retrying in 5 seconds...")
+        wait(5)
+        return sendToAPI(data)
     end
-end
-
--- Function to check current API data
-local function checkAPIData()
-    print("🔍 Checking current API data...")
     
-    local success, response = makeAPIRequest("GET")
-    
-    if success then
-        print("✅ Successfully retrieved API data")
-        return true, response
-    else
-        warn("❌ Failed to retrieve API data")
-        sendHealthLog("Failed to retrieve API data", true)
-        return false, response
-    end
+    Cache.errorCount = 0
+    print("✅ Data sent successfully")
+    return true
 end
 
 -- Anti-AFK function
@@ -338,38 +208,17 @@ local function setupAntiAFK()
         VirtualUser:CaptureController()
         VirtualUser:ClickButton2(Vector2.new())
         print("🔄 Anti-AFK triggered")
-        sendHealthLog("Anti-AFK system triggered", false)
     end)
 end
 
--- Setup weather event listener with detailed error reporting
+-- Setup weather event listener
 local function setupWeatherListener()
     print("🌦️ Setting up weather event listener...")
     
-    -- Check if the weather event exists
-    if not game.ReplicatedStorage:FindFirstChild("GameEvents") then
-        warn("❌ GameEvents not found in ReplicatedStorage")
-        sendHealthLog("GameEvents not found in ReplicatedStorage", true)
-        return false
-    end
-    
-    if not game.ReplicatedStorage.GameEvents:FindFirstChild("WeatherEventStarted") then
-        warn("❌ WeatherEventStarted event not found in GameEvents")
-        sendHealthLog("WeatherEventStarted event not found in GameEvents", true)
-        return false
-    end
-    
-    if not game.ReplicatedStorage.GameEvents.WeatherEventStarted:FindFirstChild("OnClientEvent") then
-        warn("❌ OnClientEvent not found in WeatherEventStarted")
-        sendHealthLog("OnClientEvent not found in WeatherEventStarted", true)
-        return false
-    end
-    
     -- Fix the syntax for connecting to the weather event
-    local success, result = pcall(function()
+    local success, conn = pcall(function()
         return game.ReplicatedStorage.GameEvents.WeatherEventStarted.OnClientEvent:Connect(function(weatherType, duration)
             print("🌦️ Weather event detected:", weatherType, duration)
-            sendHealthLog("Weather event detected: " .. tostring(weatherType) .. " (Duration: " .. tostring(duration) .. ")", false)
             
             -- Update weather cache
             Cache.currentWeather = weatherType or "None"
@@ -377,9 +226,7 @@ local function setupWeatherListener()
             
             -- Force an immediate update to the API
             local currentData = collectStockData()
-            
-            -- Update API data
-            updateAPIData(currentData)
+            sendToAPI(currentData)
             
             -- Update cache with new data
             Cache.seedStock = {}  -- Clear old data
@@ -399,37 +246,21 @@ local function setupWeatherListener()
     end)
     
     if not success then
-        warn("❌ Failed to set up weather listener: " .. tostring(result))
-        sendHealthLog("Failed to set up weather listener: " .. tostring(result), true)
-        return false
+        warn("⚠️ Failed to set up weather listener:", conn)
     else
         print("✅ Weather listener set up successfully")
-        sendHealthLog("Weather listener set up successfully", false)
-        return true
     end
 end
 
 -- Main monitoring function
 local function startMonitoring()
     print("🛒 Shop Stock and Weather Monitor Started")
-    sendHealthLog("Shop Stock and Weather Monitor Started", false)
     
     -- Setup anti-AFK
     pcall(setupAntiAFK)
     
-    -- Check current API data
-    local apiCheckSuccess = checkAPIData()
-    if not apiCheckSuccess then
-        warn("⚠️ Initial API check failed, but continuing anyway")
-        sendHealthLog("Initial API check failed, but continuing anyway", true)
-    end
-    
-    -- Setup weather listener with error reporting
-    local weatherSetupSuccess = pcall(setupWeatherListener)
-    if not weatherSetupSuccess then
-        print("⚠️ Weather event listener setup failed, continuing without weather tracking")
-        sendHealthLog("Weather event listener setup failed, continuing without weather tracking", true)
-    end
+    -- Setup weather listener
+    pcall(setupWeatherListener)
     
     -- Initial data collection
     local success, initialData = pcall(collectStockData)
@@ -447,15 +278,11 @@ local function startMonitoring()
         end
         
         Cache.lastUpdate = os.time()
-        Cache.lastHealthUpdate = os.time()
         
         -- Send initial data
-        updateAPIData(initialData)
-        sendHealthLog("Initial data collected and sent successfully", false)
-        sendHealthReport()
+        sendToAPI(initialData)
     else
         warn("❌ Failed to collect initial data:", initialData)
-        sendHealthLog("Failed to collect initial data: " .. tostring(initialData), true)
     end
     
     -- Main monitoring loop
@@ -465,55 +292,48 @@ local function startMonitoring()
         if success then
             local currentTime = os.time()
             
-            -- Force update every time to ensure data is always updated
-            print("📊 Updating data...")
+            -- Create a comparison object with the same structure as currentData
+            local oldData = {
+                seeds = Cache.seedStock,
+                gear = Cache.gearStock,
+                weather = {
+                    type = Cache.currentWeather,
+                    duration = Cache.weatherDuration
+                }
+            }
             
-            -- Update API data
-            if updateAPIData(currentData) then
-                -- Clear old data and store new data (not references)
-                Cache.seedStock = {}
-                Cache.gearStock = {}
+            local hasStockChanges = hasChanges(oldData, currentData)
+            local timeForceUpdate = (currentTime - Cache.lastUpdate) >= 300  -- Force update every 5 minutes
+            
+            if hasStockChanges or timeForceUpdate then
+                print("📊 Changes detected or force update triggered")
                 
-                for k, v in pairs(currentData.seeds) do
-                    Cache.seedStock[k] = v
-                end
-                
-                for k, v in pairs(currentData.gear) do
-                    Cache.gearStock[k] = v
-                end
-                
-                Cache.lastUpdate = currentTime
-                print("📊 Data updated successfully")
-                
-                -- Check if it's time to send a health report
-                if (currentTime - Cache.lastHealthUpdate) >= HEALTH_CHECK_INTERVAL then
-                    sendHealthReport()
-                    Cache.lastHealthUpdate = currentTime
+                if sendToAPI(currentData) then
+                    -- Clear old data and store new data (not references)
+                    Cache.seedStock = {}
+                    Cache.gearStock = {}
+                    
+                    for k, v in pairs(currentData.seeds) do
+                        Cache.seedStock[k] = v
+                    end
+                    
+                    for k, v in pairs(currentData.gear) do
+                        Cache.gearStock[k] = v
+                    end
+                    
+                    Cache.lastUpdate = currentTime
+                    print("📊 Data updated successfully")
                 end
             else
-                warn("❌ Failed to update API data")
-                sendHealthLog("Failed to update API data", true)
+                print("📊 No changes detected")
             end
         else
             warn("❌ Error collecting data:", currentData)
-            sendHealthLog("Error collecting data: " .. tostring(currentData), true)
         end
         
         wait(CHECK_INTERVAL)
     end
 end
 
--- Start the monitoring with error handling
-local success, errorMsg = pcall(function()
-    -- Send startup notification
-    sendHealthLog("Script starting up...", false)
-    wait(1) -- Wait a bit to ensure the message is sent
-    
-    -- Start monitoring
-    startMonitoring()
-end)
-
-if not success then
-    warn("❌ Critical error in monitoring script: " .. tostring(errorMsg))
-    sendHealthLog("CRITICAL ERROR: " .. tostring(errorMsg), true)
-end
+-- Start the monitoring
+startMonitoring()
