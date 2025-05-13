@@ -5,8 +5,8 @@ print("🛒 Shop Stock and Weather Monitor Starting...")
 local API_ENDPOINT = "https://gagdata.vercel.app/api/data"
 local API_AUTH_KEY = "GAMERSBERGGAG"
 local DISCORD_WEBHOOK = "https://discord.com/api/webhooks/1371909907716112465/02IHVPmNEadS6nTwcseKNPHPwjIxK2P4raUE4tzgaqz_NO3vGaIAbF8aN76wVM5-YnPO"
-local CHECK_INTERVAL = 5  -- Check every 5 seconds
-local HEALTH_CHECK_INTERVAL = 60  -- Send health update every 60 seconds
+local CHECK_INTERVAL = 1  -- Check every 5 seconds
+local HEALTH_CHECK_INTERVAL = 15  -- Send health update every 60 seconds
 local MAX_RETRIES = 3
 
 -- Cache to track changes
@@ -65,7 +65,6 @@ local function sendHealthReport()
 **Uptime**: %02d:%02d:%02d
 **Player**: %s
 **Game ID**: %s
-**API Endpoint**: %s
 
 **Statistics**:
 • Successful Updates: %d
@@ -82,7 +81,6 @@ local function sendHealthReport()
         hours, minutes, seconds,
         game.Players.LocalPlayer.Name,
         game.PlaceId,
-        API_ENDPOINT,
         Cache.successfulUpdates,
         Cache.failedUpdates,
         Cache.currentWeather,
@@ -238,7 +236,12 @@ local function makeAPIRequest(method, data)
         end
         
         -- Send request using the supported REQUEST function
-        return request(options)
+        local result = request(options)
+        
+        -- Print response for debugging
+        print("API Response (" .. method .. "):", result.StatusCode, result.Body and string.sub(result.Body, 1, 100) .. "..." or "No body")
+        
+        return result
     end)
     
     if not success then
@@ -247,7 +250,14 @@ local function makeAPIRequest(method, data)
         return false, response
     end
     
-    return true, response
+    -- Check if the status code indicates success
+    if response.StatusCode >= 200 and response.StatusCode < 300 then
+        return true, response
+    else
+        warn("❌ API request failed with status code:", response.StatusCode)
+        sendHealthLog("API request failed with status code: " .. tostring(response.StatusCode), true)
+        return false, response
+    end
 end
 
 -- Function to clear existing API data
@@ -260,8 +270,8 @@ local function clearAPIData()
         print("✅ Successfully cleared API data")
         return true
     else
-        warn("❌ Failed to clear API data:", response)
-        sendHealthLog("Failed to clear API data: " .. tostring(response), true)
+        warn("❌ Failed to clear API data:", response.StatusCode)
+        sendHealthLog("Failed to clear API data: " .. tostring(response.StatusCode), true)
         return false
     end
 end
@@ -414,42 +424,10 @@ local function setupWeatherListener()
     end
 end
 
--- Function to test API connection
-local function testAPIConnection()
-    print("🔄 Testing API connection...")
-    sendHealthLog("Testing API connection...", false)
-    
-    local success, response = pcall(function()
-        return request({
-            Url = API_ENDPOINT,
-            Method = "GET",
-            Headers = {
-                ["Authorization"] = API_AUTH_KEY
-            }
-        })
-    end)
-    
-    if not success then
-        warn("❌ API connection test failed:", response)
-        sendHealthLog("API connection test failed: " .. tostring(response), true)
-        return false
-    end
-    
-    print("✅ API connection test successful")
-    sendHealthLog("API connection test successful", false)
-    return true
-end
-
 -- Main monitoring function
 local function startMonitoring()
     print("🛒 Shop Stock and Weather Monitor Started")
     sendHealthLog("Shop Stock and Weather Monitor Started", false)
-    
-    -- Test API connection
-    if not testAPIConnection() then
-        warn("⚠️ API connection test failed, but continuing anyway")
-        sendHealthLog("API connection test failed, but continuing anyway", true)
-    end
     
     -- Setup anti-AFK
     pcall(setupAntiAFK)
@@ -508,46 +486,34 @@ local function startMonitoring()
                 }
             }
             
-            local hasStockChanges = hasChanges(oldData, currentData)
-            local timeForceUpdate = (currentTime - Cache.lastUpdate) >= 300  -- Force update every 5 minutes
+            -- Force update every time to ensure data is always updated
+            print("📊 Updating data...")
             
-            -- Check if it's time to send a health report
-            if (currentTime - Cache.lastHealthUpdate) >= HEALTH_CHECK_INTERVAL then
-                sendHealthReport()
-                Cache.lastHealthUpdate = currentTime
-            end
+            -- Clear existing API data before sending new data
+            clearAPIData()
             
-            if hasStockChanges or timeForceUpdate then
-                print("📊 Changes detected or force update triggered")
+            -- Send new data
+            if sendToAPI(currentData) then
+                -- Clear old data and store new data (not references)
+                Cache.seedStock = {}
+                Cache.gearStock = {}
                 
-                -- Clear existing API data before sending new data
-                clearAPIData()
-                
-                -- Send new data
-                if sendToAPI(currentData) then
-                    -- Clear old data and store new data (not references)
-                    Cache.seedStock = {}
-                    Cache.gearStock = {}
-                    
-                    for k, v in pairs(currentData.seeds) do
-                        Cache.seedStock[k] = v
-                    end
-                    
-                    for k, v in pairs(currentData.gear) do
-                        Cache.gearStock[k] = v
-                    end
-                    
-                    Cache.lastUpdate = currentTime
-                    print("📊 Data updated successfully")
-                    
-                    if hasStockChanges then
-                        sendHealthLog("Stock changes detected and updated successfully", false)
-                    elseif timeForceUpdate then
-                        sendHealthLog("Force update triggered and completed successfully", false)
-                    end
+                for k, v in pairs(currentData.seeds) do
+                    Cache.seedStock[k] = v
                 end
-            else
-                print("📊 No changes detected")
+                
+                for k, v in pairs(currentData.gear) do
+                    Cache.gearStock[k] = v
+                end
+                
+                Cache.lastUpdate = currentTime
+                print("📊 Data updated successfully")
+                
+                -- Check if it's time to send a health report
+                if (currentTime - Cache.lastHealthUpdate) >= HEALTH_CHECK_INTERVAL then
+                    sendHealthReport()
+                    Cache.lastHealthUpdate = currentTime
+                end
             end
         else
             warn("❌ Error collecting data:", currentData)
@@ -561,7 +527,7 @@ end
 -- Start the monitoring with error handling
 local success, errorMsg = pcall(function()
     -- Send startup notification
-    sendHealthLog("Script starting up with new API endpoint: " .. API_ENDPOINT, false)
+    sendHealthLog("Script starting up...", false)
     wait(1) -- Wait a bit to ensure the message is sent
     
     -- Start monitoring
