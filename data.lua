@@ -179,9 +179,9 @@ local function collectStockData()
     end
     
     return data
-end
+}
 
--- Function to make API requests (GET, POST, DELETE)
+-- Function to make API requests (GET, POST, PUT, PATCH, DELETE)
 local function makeAPIRequest(method, data)
     local success, response = pcall(function()
         local options = {
@@ -233,7 +233,7 @@ local function makeAPIRequest(method, data)
             jsonStr = jsonStr .. "}"
             
             options.Body = jsonStr
-        end
+        }
         
         -- Send request using the supported REQUEST function
         local result = request(options)
@@ -252,7 +252,25 @@ local function makeAPIRequest(method, data)
     
     -- Check if the status code indicates success
     if response.StatusCode >= 200 and response.StatusCode < 300 then
-        return true, response
+        -- Try to parse the response body
+        local responseData
+        success, responseData = pcall(function()
+            -- Simple JSON parser for the specific response structure
+            local body = response.Body
+            if body and body:match('"success":true') then
+                return {success = true}
+            else
+                return {success = false, message = body}
+            end
+        end)
+        
+        if success and responseData.success then
+            return true, response
+        else
+            warn("❌ API request failed with response:", responseData.message or "Unknown error")
+            sendHealthLog("API request failed with response: " .. (responseData.message or "Unknown error"), true)
+            return false, response
+        end
     else
         warn("❌ API request failed with status code:", response.StatusCode)
         sendHealthLog("API request failed with status code: " .. tostring(response.StatusCode), true)
@@ -260,87 +278,57 @@ local function makeAPIRequest(method, data)
     end
 end
 
--- Function to clear existing API data
-local function clearAPIData()
-    print("🗑️ Clearing existing API data...")
+-- Function to update data using the appropriate method based on permissions
+local function updateAPIData(data)
+    print("📤 Updating API data...")
     
-    local success, response = makeAPIRequest("DELETE")
+    -- Try PUT first (replaces data)
+    local success, response = makeAPIRequest("PUT", data)
     
     if success then
-        print("✅ Successfully cleared API data")
+        print("✅ Successfully updated API data using PUT")
         return true
     else
-        warn("❌ Failed to clear API data:", response.StatusCode)
-        sendHealthLog("Failed to clear API data: " .. tostring(response.StatusCode), true)
-        return false
+        print("⚠️ PUT failed, trying POST...")
+        
+        -- If PUT fails, try POST (creates new data)
+        success, response = makeAPIRequest("POST", data)
+        
+        if success then
+            print("✅ Successfully updated API data using POST")
+            return true
+        else
+            print("⚠️ POST failed, trying PATCH...")
+            
+            -- If POST fails, try PATCH (updates data partially)
+            success, response = makeAPIRequest("PATCH", data)
+            
+            if success then
+                print("✅ Successfully updated API data using PATCH")
+                return true
+            else
+                warn("❌ All update methods failed")
+                sendHealthLog("All API update methods failed", true)
+                return false
+            end
+        end
     end
 end
 
--- Function to send data to API
-local function sendToAPI(data)
-    local success, response = makeAPIRequest("POST", data)
+-- Function to check current API data
+local function checkAPIData()
+    print("🔍 Checking current API data...")
     
-    if not success then
-        Cache.errorCount = Cache.errorCount + 1
-        Cache.failedUpdates = Cache.failedUpdates + 1
-        
-        if Cache.errorCount >= MAX_RETRIES then
-            warn("⚠️ Max retry attempts reached")
-            sendHealthLog("Max retry attempts reached for API update", true)
-            Cache.errorCount = 0
-            return false
-        end
-        
-        print("🔄 Retrying in 5 seconds...")
-        wait(5)
-        return sendToAPI(data)
+    local success, response = makeAPIRequest("GET")
+    
+    if success then
+        print("✅ Successfully retrieved API data")
+        return true, response
+    else
+        warn("❌ Failed to retrieve API data")
+        sendHealthLog("Failed to retrieve API data", true)
+        return false, response
     end
-    
-    Cache.errorCount = 0
-    Cache.successfulUpdates = Cache.successfulUpdates + 1
-    print("✅ Data sent successfully")
-    return true
-end
-
--- Function to detect changes in stock data
-local function hasChanges(oldData, newData)
-    -- Check weather changes
-    if oldData.weather.type ~= newData.weather.type or 
-       oldData.weather.duration ~= newData.weather.duration then
-        return true
-    end
-    
-    -- Check seeds
-    for seedName, newStock in pairs(newData.seeds) do
-        if oldData.seeds[seedName] ~= newStock then
-            return true
-        end
-    end
-    
-    -- Check for new or removed seeds
-    local oldSeedCount, newSeedCount = 0, 0
-    for _ in pairs(oldData.seeds) do oldSeedCount = oldSeedCount + 1 end
-    for _ in pairs(newData.seeds) do newSeedCount = newSeedCount + 1 end
-    if oldSeedCount ~= newSeedCount then
-        return true
-    end
-    
-    -- Check gear
-    for gearName, newStock in pairs(newData.gear) do
-        if oldData.gear[gearName] ~= newStock then
-            return true
-        end
-    end
-    
-    -- Check for new or removed gear
-    local oldGearCount, newGearCount = 0, 0
-    for _ in pairs(oldData.gear) do oldGearCount = oldGearCount + 1 end
-    for _ in pairs(newData.gear) do newGearCount = newGearCount + 1 end
-    if oldGearCount ~= newGearCount then
-        return true
-    end
-    
-    return false
 end
 
 -- Anti-AFK function
@@ -390,11 +378,8 @@ local function setupWeatherListener()
             -- Force an immediate update to the API
             local currentData = collectStockData()
             
-            -- Clear existing API data before sending new data
-            clearAPIData()
-            
-            -- Send new data
-            sendToAPI(currentData)
+            -- Update API data
+            updateAPIData(currentData)
             
             -- Update cache with new data
             Cache.seedStock = {}  -- Clear old data
@@ -432,8 +417,12 @@ local function startMonitoring()
     -- Setup anti-AFK
     pcall(setupAntiAFK)
     
-    -- Clear existing API data before starting
-    clearAPIData()
+    -- Check current API data
+    local apiCheckSuccess = checkAPIData()
+    if not apiCheckSuccess then
+        warn("⚠️ Initial API check failed, but continuing anyway")
+        sendHealthLog("Initial API check failed, but continuing anyway", true)
+    end
     
     -- Setup weather listener with error reporting
     local weatherSetupSuccess = pcall(setupWeatherListener)
@@ -461,7 +450,7 @@ local function startMonitoring()
         Cache.lastHealthUpdate = os.time()
         
         -- Send initial data
-        sendToAPI(initialData)
+        updateAPIData(initialData)
         sendHealthLog("Initial data collected and sent successfully", false)
         sendHealthReport()
     else
@@ -476,24 +465,11 @@ local function startMonitoring()
         if success then
             local currentTime = os.time()
             
-            -- Create a comparison object with the same structure as currentData
-            local oldData = {
-                seeds = Cache.seedStock,
-                gear = Cache.gearStock,
-                weather = {
-                    type = Cache.currentWeather,
-                    duration = Cache.weatherDuration
-                }
-            }
-            
             -- Force update every time to ensure data is always updated
             print("📊 Updating data...")
             
-            -- Clear existing API data before sending new data
-            clearAPIData()
-            
-            -- Send new data
-            if sendToAPI(currentData) then
+            -- Update API data
+            if updateAPIData(currentData) then
                 -- Clear old data and store new data (not references)
                 Cache.seedStock = {}
                 Cache.gearStock = {}
@@ -514,6 +490,9 @@ local function startMonitoring()
                     sendHealthReport()
                     Cache.lastHealthUpdate = currentTime
                 end
+            else
+                warn("❌ Failed to update API data")
+                sendHealthLog("Failed to update API data", true)
             end
         else
             warn("❌ Error collecting data:", currentData)
